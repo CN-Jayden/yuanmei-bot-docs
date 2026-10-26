@@ -1,0 +1,1788 @@
+openapi: 3.1.0
+
+info:
+  title: 猿媒BOT 开放 API
+  version: '2026-10-26'
+  summary: 猿媒BOT 开发者 Open API：发送消息、读取会话与消息、搜索、版本查询与事件回调。
+  description: |
+    猿媒BOT 开发者 Open API。客户系统可以：
+
+    - 主动向企业微信会话发送文本 / 图片 / 链接
+    - 读取机器人、群聊与联系人
+    - 按时间增量读取消息、按关键词搜索
+    - 通过事件回调接收消息与任务事件，并可直接回复
+
+    ## 版本与地址
+
+    - 当前版本：`2026-10-26`，新接入统一使用 `/api/v1/open/*`
+    - 旧地址 `/api/open/*` 继续兼容，行为与新地址一致
+    - 所有响应带 `X-Yuanmei-Api-Version` 响应头
+
+    ## 认证
+
+    请求头使用 `Authorization: Bearer <API Token>`。Token 在「个人中心 → API 接入」签发，
+    只完整显示一次，可随时撤销；服务端只保存哈希。
+
+    | 权限 | 能力 |
+    | --- | --- |
+    | `send` | 发送消息（`/send`） |
+    | `read` | 机器人、会话、消息、搜索、发送状态（当前实现 `/send/status` 要求 `read`） |
+
+    旧版本签发、未单独配置权限的 Token 默认同时拥有 `send` 与 `read`。
+    缺少或无效 Token 返回 `401`；权限不足、账户服务不可用返回 `403`。
+
+    ## 通用约定
+
+    - 除 `/version` 为 `GET` 外，所有接口均为 `POST`，请求体必须是 `application/json`（上限 64KB）
+    - 成功：HTTP 2xx，响应体为 `{"ok": true, ...}`
+    - 失败：对应 HTTP 状态码 + `{"error": "错误原因"}`
+    - 限流：按来源 IP 每分钟 120 次（`send` 与 `read` 分别计数），超限返回 `429`
+    - 携带 `Origin` 的浏览器请求要求与站点同源，否则返回 `403`
+    - 幂等：发送接口支持 `Idempotency-Key` 请求头（或请求体 `idempotencyKey`），24 小时内相同键只真正发送一次
+    - 测试空间 Token 只能访问测试群：发送与读取都必须使用测试群会话
+
+    ## 机器人回落规则
+
+    `/conversations`、`/messages`、`/search`、`/send` 的 `robotId` 均可省略；省略或传入无效 ID 时
+    使用账户下第一个可用机器人。账户没有任何可用机器人时返回 `404`。
+
+    ## 事件回调
+
+    见本文件 `webhooks` 部分：`message.received`、`message.sent`、`message.failed`、`message.uncertain`、
+    `task.reminded`、`task.confirmed`、`task.expired`，以及控制台「测试」触发的 `webhook.test`。
+
+    回调使用 HMAC-SHA256 签名（对 `${X-Yuanmei-Timestamp}.${原始请求体}` 计算），签名放在
+    `X-Yuanmei-Signature` 请求头。超时或 5xx 最多重试 3 次，重试时 `eventId` 不变，请按 `eventId` 去重。
+    回调地址必须为 HTTPS，且不能指向本机或内网地址。
+
+    控制台可按事件类型订阅、按会话 ID / 关键词过滤，并可配置推送 QPS（1–50，未配置时不限速）
+    与请求超时（1–15 秒，默认 8 秒）。
+  contact:
+    name: 猿媒BOT
+    url: https://chatbot.apetd.com
+
+servers:
+  - url: https://chatbot.apetd.com
+    description: 生产环境
+  - url: http://localhost:4318
+    description: 本地开发（npm start 默认端口 4318）
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: 发送消息
+    description: 向企业微信会话发送文本、图片或链接卡片。
+  - name: 读取数据
+    description: 机器人、会话与消息的只读查询。
+  - name: 版本
+    description: Open API 版本信息。
+  - name: 事件回调
+    description: 猿媒BOT 推送到业务方系统的业务事件。
+
+paths:
+  /api/v1/open/send:
+    post:
+      tags:
+        - 发送消息
+      summary: 发送消息
+      operationId: sendMessage
+      x-required-scope: send
+      x-legacy-path: /api/open/send
+      description: |
+        服务端主动发送消息。消息入队后返回 `202`，`status` 固定为 `pending`，最终结果用
+        `/api/v1/open/send/status` 查询；演示机器人不会真实发送，状态会变成 `simulated`。
+
+        - `conversationId` 必须是该机器人已同步的群聊 / 私聊会话（`R:` 群聊、`S:` 私聊），否则返回 `400`
+        - `type` 默认 `text`；`msgtype` 是 `type` 的别名，两者同时出现时 `msgtype` 优先
+        - `text`：需要 `content`（1–2000 字）；`atUserIds` 仅群会话可用（超过 50 个会被截断）
+        - `image`：需要公网可访问的 `imageUrl`（http / https）
+        - `link`：需要 `title`（≤100 字）与 `url`，`desc` 和 `imageUrl` 可选（`desc` 超过 500 字会被截断）
+        - 幂等键：`Idempotency-Key` 请求头或请求体 `idempotencyKey`；24 小时内重复请求返回 `200` +
+          `duplicate: true`，不会重复发送
+        - 待发送任务达到 100 条时返回 `400`；测试空间 Token 只能发送到测试群，否则 `403`
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            examples:
+              text:
+                summary: 文本消息
+                value:
+                  conversationId: 'R:10949759080209864'
+                  type: text
+                  content: 课程价格为 199 元。
+                  atUserIds:
+                    - wmXXXX
+              image:
+                summary: 图片消息
+                value:
+                  conversationId: 'R:10949759080209864'
+                  type: image
+                  imageUrl: https://example.com/a.png
+              link:
+                summary: 链接卡片
+                value:
+                  conversationId: 'R:10949759080209864'
+                  type: link
+                  title: 课程介绍
+                  url: https://example.com/course
+                  imageUrl: https://example.com/cover.png
+                  desc: 12 节课，199 元
+      responses:
+        '200':
+          description: 命中 24 小时内的幂等键，本次未再次入队。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendDuplicate'
+        '202':
+          description: 已入队，等待发送。`pending` 不代表已送达。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/open/send/status:
+    post:
+      tags:
+        - 发送消息
+      summary: 查询发送状态
+      operationId: getSendStatus
+      x-required-scope: read
+      x-legacy-path: /api/open/send/status
+      description: |
+        查询消息的最终发送状态。当前实现使用 `read` 权限，仅持 `send` 权限的 Token 会返回 `403`。
+
+        `messageId` 使用 `/send` 返回的 ID；请求体也接受 `id` 作为别名。
+        如传入的是入站消息 ID，可能返回 `received` 等入站状态。
+
+        | 状态 | 含义 |
+        | --- | --- |
+        | `pending` | 已入队，等待发送 |
+        | `accepted` | 上游已受理 |
+        | `failed` | 上游明确拒绝，可安全重发 |
+        | `uncertain` | 超时结果未知，重发前请人工确认 |
+        | `blocked` | 授权、额度或机器人状态导致未发出 |
+        | `simulated` | 演示机器人模拟发送，未真实发出 |
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendStatusRequest'
+            examples:
+              byMessageId:
+                summary: 按 messageId 查询
+                value:
+                  messageId: 0b1c2d3e-4f50-6789-abcd-ef0123456789
+      responses:
+        '200':
+          description: 消息状态。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/open/robots:
+    post:
+      tags:
+        - 读取数据
+      summary: 机器人列表
+      operationId: listRobots
+      x-required-scope: read
+      x-legacy-path: /api/open/robots
+      description: |
+        返回账户下所有可用机器人（已解绑的机器人不返回），以及每个机器人的群聊、联系人数。
+
+        该接口不读取请求体，但仍必须发送 `Content-Type: application/json`（请求体传 `{}` 即可），
+        否则返回 `415`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: 占位请求体，服务端不读取。
+              additionalProperties: true
+            examples:
+              empty:
+                summary: 空对象
+                value: {}
+      responses:
+        '200':
+          description: 机器人列表；账户下没有可用机器人时 `robots` 为空数组。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RobotsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/open/conversations:
+    post:
+      tags:
+        - 读取数据
+      summary: 会话列表
+      operationId: listConversations
+      x-required-scope: read
+      x-legacy-path: /api/open/conversations
+      description: |
+        返回指定机器人已同步的群聊（`groups`）与联系人（`users`）。
+
+        - `robotId` 可省略；省略或无效时使用账户下第一个可用机器人
+        - 会话对象保持同步结果原貌：稳定字段为 `conversation_id` 与 `name`，可能附带
+          `username`、`nickname`、`remark`、`avatar` 等扩展字段
+        - 测试空间 Token 只返回测试群相关会话
+        - 账户没有可用机器人时返回 `404`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationsRequest'
+            examples:
+              byRobot:
+                summary: 指定机器人
+                value:
+                  robotId: 0b1c2d3e-4f50-6789-abcd-ef0123456789
+      responses:
+        '200':
+          description: 会话列表。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/open/messages:
+    post:
+      tags:
+        - 读取数据
+      summary: 读取消息
+      operationId: readMessages
+      x-required-scope: read
+      x-legacy-path: /api/open/messages
+      description: |
+        读取机器人消息，按时间正序返回。
+
+        - `after` 用于增量轮询：只返回晚于该时间的消息，从最早未读开始最多 `limit` 条
+        - 响应中的 `nextAfter` 作为下一次请求的 `after`
+        - `direction`：`in` 客户消息、`out` 机器人消息、`all` 全部（默认，包含 `system` 系统消息）
+        - `limit` 默认 20，上限 100
+        - `conversationId` 可选；不传则读取该机器人全部会话
+        - 测试空间 Token 必须指定 `conversationId`（否则 `400`），且只能读取测试群（否则 `403`）
+        - 账户没有可用机器人时返回 `404`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReadMessagesRequest'
+            examples:
+              incremental:
+                summary: 增量轮询
+                value:
+                  conversationId: 'R:10949759080209864'
+                  after: '2026-10-26T12:00:00.000Z'
+                  direction: all
+                  limit: 20
+      responses:
+        '200':
+          description: 消息列表；没有新消息时 `messages` 为空数组。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/open/search:
+    post:
+      tags:
+        - 读取数据
+      summary: 搜索消息
+      operationId: searchMessages
+      x-required-scope: read
+      x-legacy-path: /api/open/search
+      description: |
+        按关键词搜索消息，关键词同时匹配消息正文与发言人昵称。
+
+        - `query` 必填（也接受 `q` 作为别名）；去除首尾空格后上限 80 字，为空返回 `400`
+        - 结果按时间正序返回最近的 `limit` 条，`limit` 默认 20、上限 100
+        - `conversationId` 可选；`robotId` 省略或无效时使用账户第一个可用机器人
+        - 测试空间 Token 只搜索测试群
+        - 账户没有可用机器人时返回 `404`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchMessagesRequest'
+            examples:
+              byKeyword:
+                summary: 按关键词搜索
+                value:
+                  query: 课程
+                  conversationId: 'R:10949759080209864'
+                  limit: 20
+      responses:
+        '200':
+          description: 搜索结果；`query` 为服务端归一化后的关键词。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchMessagesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/open/version:
+    get:
+      tags:
+        - 版本
+      summary: 版本信息
+      operationId: getVersion
+      description: |
+        返回 Open API 版本、新地址前缀与旧地址前缀。无需认证，也不参与限流；
+        同时可通过旧地址 `/api/open/version` 访问。
+      security: []
+      responses:
+        '200':
+          description: 版本信息。
+          headers:
+            X-Yuanmei-Api-Version:
+              $ref: '#/components/headers/X-Yuanmei-Api-Version'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+webhooks:
+  messageReceived:
+    post:
+      tags:
+        - 事件回调
+      summary: message.received — 收到客户消息
+      operationId: onMessageReceived
+      x-yuanmei-event: message.received
+      description: |
+        收到客户消息时推送。机器人自身回流、已忽略的消息不推送；未配置订阅时默认全量推送。
+        只有本事件支持在 2xx 响应体中返回 `reply` / `replyText` 自动回群。
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageReceivedEvent'
+      responses:
+        '2XX':
+          description: |
+            2xx 视为投递成功。响应体可返回 `reply`（或简写 `replyText`）让猿媒BOT 自动回群；
+            返回空响应或 `{}` 也表示已收到、不自动回复。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookReplyResponse'
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次（约 30 秒、2 分钟后重试），`eventId` 不变。
+  messageSent:
+    post:
+      tags:
+        - 事件回调
+      summary: message.sent — 机器人消息已受理
+      operationId: onMessageSent
+      x-yuanmei-event: message.sent
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: |
+        机器人消息被上游受理时推送，`status` 为 `accepted`。排队中（`pending`）、模拟发送
+        （`simulated`）与被拦截（`blocked`）不推送。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageStatusEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+  messageFailed:
+    post:
+      tags:
+        - 事件回调
+      summary: message.failed — 消息发送被上游拒绝
+      operationId: onMessageFailed
+      x-yuanmei-event: message.failed
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: 上游明确拒绝发送时推送，`status` 为 `failed`，`error` 携带失败原因，可安全重发。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageStatusEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+  messageUncertain:
+    post:
+      tags:
+        - 事件回调
+      summary: message.uncertain — 发送超时结果未知
+      operationId: onMessageUncertain
+      x-yuanmei-event: message.uncertain
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: 发送超时、结果未知时推送，`status` 为 `uncertain`；重发前请人工确认，避免重复发送。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageStatusEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+  taskReminded:
+    post:
+      tags:
+        - 事件回调
+      summary: task.reminded — 任务提醒已发出
+      operationId: onTaskReminded
+      x-yuanmei-event: task.reminded
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: |
+        任务到期前提醒发出时推送。每次提醒都是独立事件，`eventId` 形如
+        `任务ID:task.reminded:提醒次数`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+  taskConfirmed:
+    post:
+      tags:
+        - 事件回调
+      summary: task.confirmed — 任务被确认
+      operationId: onTaskConfirmed
+      x-yuanmei-event: task.confirmed
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: 任务被确认词或 API 确认后推送，`status` 为 `confirmed`，`confirmedBy` 为确认人；每任务只推送一次。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+  taskExpired:
+    post:
+      tags:
+        - 事件回调
+      summary: task.expired — 任务到期结束
+      operationId: onTaskExpired
+      x-yuanmei-event: task.expired
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: 任务到期结束仍未确认时推送，`status` 为 `expired`；每任务只推送一次。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+  webhookTest:
+    post:
+      tags:
+        - 事件回调
+      summary: webhook.test — 回调连通性测试
+      operationId: onWebhookTest
+      x-yuanmei-event: webhook.test
+      parameters:
+        - $ref: '#/components/parameters/WebhookEventHeader'
+        - $ref: '#/components/parameters/WebhookTimestampHeader'
+        - $ref: '#/components/parameters/WebhookNonceHeader'
+        - $ref: '#/components/parameters/WebhookSignatureHeader'
+      description: 在「个人中心 → API 接入 → 事件回调」点击「测试」时推送，用于验证地址与签名，不属于可订阅事件。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookTestEvent'
+      responses:
+        '2XX':
+          description: 2xx 视为投递成功，响应体可忽略。
+        '4XX':
+          description: 视为业务方明确拒绝，不重试、不入队。
+        '5XX':
+          description: 进入持久化重试队列，最多尝试 3 次，`eventId` 不变。
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API Token
+      description: |
+        `Authorization: Bearer <API Token>`。Token 在「个人中心 → API 接入」签发，只完整显示一次，
+        可随时撤销。签发时选择权限范围：`send`（发送）与 `read`（读取）。
+
+        缺少或无效 Token 返回 `401`；Token 不含所需权限、账户服务不可用返回 `403`。
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        发送幂等键。24 小时内相同键只真正入队一次，重复请求返回 `200` + `duplicate: true`。
+        也可放在请求体 `idempotencyKey` 字段；超过 120 字符会被截断。
+      schema:
+        type: string
+        examples:
+          - order-123-notify
+    WebhookEventHeader:
+      name: X-Yuanmei-Event
+      in: header
+      required: true
+      description: 事件类型，与请求体 `event` 字段一致。
+      schema:
+        type: string
+        enum:
+          - message.received
+          - message.sent
+          - message.failed
+          - message.uncertain
+          - task.reminded
+          - task.confirmed
+          - task.expired
+          - webhook.test
+    WebhookTimestampHeader:
+      name: X-Yuanmei-Timestamp
+      in: header
+      required: true
+      description: Unix 时间戳（秒）。参与签名，建议校验在 5 分钟内以防御重放。
+      schema:
+        type: string
+        pattern: '^[0-9]{10}$'
+        examples:
+          - '1793017003'
+    WebhookNonceHeader:
+      name: X-Yuanmei-Nonce
+      in: header
+      required: true
+      description: 随机串，可用于去重。
+      schema:
+        type: string
+        examples:
+          - 8f3c2a1b9d4e5f60
+    WebhookSignatureHeader:
+      name: X-Yuanmei-Signature
+      in: header
+      required: true
+      description: |
+        HMAC-SHA256 签名，格式为 `sha256=<hex>`，签名内容为
+        `${X-Yuanmei-Timestamp}.${原始请求体}`，密钥为控制台生成的回调密钥。
+        请使用原始请求体字符串验签，并用常量时间比较。
+      schema:
+        type: string
+        pattern: '^sha256=[0-9a-f]{64}$'
+
+  headers:
+    X-Yuanmei-Api-Version:
+      description: 当前 Open API 版本。
+      schema:
+        type: string
+        examples:
+          - '2026-10-26'
+
+  responses:
+    BadRequest:
+      description: |
+        请求不合法：JSON 解析失败、必填字段缺失或超长、消息类型不支持、会话未同步、
+        搜索关键词为空等。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidJson:
+              summary: 请求体不是合法 JSON
+              value:
+                error: 请求需要有效 JSON
+            invalidConversation:
+              summary: 会话未同步
+              value:
+                error: 请先同步并选择此机器人的会话
+    Unauthorized:
+      description: '缺少 `Authorization: Bearer <token>`，或 Token 无效、账户已停用。'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingToken:
+              summary: 缺少 Token
+              value:
+                error: '缺少 Authorization: Bearer <token>'
+            invalidToken:
+              summary: Token 无效
+              value:
+                error: API Token 无效或账户已停用
+    Forbidden:
+      description: |
+        Token 权限不足、账户服务未开通或已到期、浏览器来源校验失败、测试空间越权访问。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingScope:
+              summary: 权限不足
+              value:
+                error: 该 API Token 没有 read 权限
+            serviceUnavailable:
+              summary: 账户服务不可用
+              value:
+                error: 账户未开通或已停用，请联系平台开通授权
+    NotFound:
+      description: 机器人或消息不存在（账户下没有可用机器人、消息不属于当前账户等）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            noRobot:
+              summary: 没有可用机器人
+              value:
+                error: 没有可用的机器人
+            noMessage:
+              summary: 消息不存在
+              value:
+                error: 消息不存在
+    PayloadTooLarge:
+      description: 请求体超过 64KB。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            tooLarge:
+              value:
+                error: 请求内容过大
+    UnsupportedMediaType:
+      description: 'POST 请求必须使用 `Content-Type: application/json`。'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            wrongContentType:
+              value:
+                error: 需要 application/json
+    TooManyRequests:
+      description: 同一来源 IP 每分钟超过 120 次（发送与读取分别计数）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            rateLimited:
+              value:
+                error: 操作过于频繁，请一分钟后再试
+    InternalError:
+      description: 服务端异常。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            serverError:
+              value:
+                error: 服务暂时不可用
+
+  schemas:
+    Error:
+      type: object
+      description: '统一错误响应。业务错误使用对应 HTTP 状态码，不会返回 `ok: false`。'
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: 人类可读的中文错误原因。
+          examples:
+            - 请先同步并选择此机器人的会话
+      additionalProperties: false
+
+    SendMessageRequest:
+      type: object
+      description: |
+        发送消息请求。`conversationId` / `conversation_id`、`type` / `msgtype`、`imageUrl` / `image_url`
+        分别互为别名；别名同时出现时按实现取 `msgtype`、`conversationId`、`imageUrl` 的优先顺序
+        （`msgtype` > `type`，`conversationId` > `conversation_id`，`imageUrl` > `image_url`）。
+        未列出的字段会被忽略。
+      properties:
+        robotId:
+          type: string
+          description: 机器人 ID；省略或无效时使用账户下第一个可用机器人。
+        conversationId:
+          type: string
+          maxLength: 200
+          description: 目标会话 ID；`R:` 开头为群聊，`S:` 开头为私聊。必须是该机器人已同步的会话。
+          examples:
+            - 'R:10949759080209864'
+        conversation_id:
+          type: string
+          maxLength: 200
+          description: conversationId 的别名。
+        type:
+          type: string
+          enum:
+            - text
+            - image
+            - link
+          default: text
+          description: 消息类型，默认 text。
+        msgtype:
+          type: string
+          enum:
+            - text
+            - image
+            - link
+          description: type 的别名，同时出现时优先于 type。
+        content:
+          type: string
+          maxLength: 2000
+          description: 文本内容（text 必填），不能为空，最长 2000 字。
+        atUserIds:
+          type: array
+          items:
+            type: string
+          description: 群内 @ 的成员 user_id 列表；仅群会话（`R:` 开头）可用，超过 50 个会被截断。
+        imageUrl:
+          type: string
+          format: uri
+          description: 图片公网地址（image 必填），只支持 http / https。
+        image_url:
+          type: string
+          format: uri
+          description: imageUrl 的别名。
+        title:
+          type: string
+          maxLength: 100
+          description: 链接卡片标题（link 必填），最长 100 字。
+        url:
+          type: string
+          format: uri
+          description: 链接卡片地址（link 必填），只支持 http / https。
+        desc:
+          type: string
+          description: 链接卡片摘要（link 可选），超过 500 字会被截断。
+        idempotencyKey:
+          type: string
+          description: 幂等键，等价于 `Idempotency-Key` 请求头；超过 120 字符会被截断。
+      allOf:
+        - anyOf:
+            - required:
+                - conversationId
+            - required:
+                - conversation_id
+        - if:
+            properties:
+              type:
+                const: text
+            required:
+              - type
+          then:
+            required:
+              - content
+        - if:
+            properties:
+              type:
+                const: image
+            required:
+              - type
+          then:
+            anyOf:
+              - required:
+                  - imageUrl
+              - required:
+                  - image_url
+        - if:
+            properties:
+              type:
+                const: link
+            required:
+              - type
+          then:
+            required:
+              - title
+              - url
+        - if:
+            properties:
+              msgtype:
+                const: text
+            required:
+              - msgtype
+          then:
+            required:
+              - content
+        - if:
+            properties:
+              msgtype:
+                const: image
+            required:
+              - msgtype
+          then:
+            anyOf:
+              - required:
+                  - imageUrl
+              - required:
+                  - image_url
+        - if:
+            properties:
+              msgtype:
+                const: link
+            required:
+              - msgtype
+          then:
+            required:
+              - title
+              - url
+
+    SendAccepted:
+      type: object
+      description: 消息已入队（HTTP 202）。`pending` 表示已入队，不代表已送达。
+      required:
+        - ok
+        - messageId
+        - status
+        - conversationId
+      properties:
+        ok:
+          type: boolean
+          const: true
+        messageId:
+          type: string
+          description: 消息 ID，用于查询发送状态。
+        status:
+          type: string
+          const: pending
+        conversationId:
+          type: string
+      additionalProperties: false
+      examples:
+        - ok: true
+          messageId: 0b1c2d3e-4f50-6789-abcd-ef0123456789
+          status: pending
+          conversationId: 'R:10949759080209864'
+
+    SendDuplicate:
+      type: object
+      description: 命中 24 小时内相同幂等键（HTTP 200），本次未再次发送。
+      required:
+        - ok
+        - duplicate
+        - messageId
+        - status
+        - conversationId
+      properties:
+        ok:
+          type: boolean
+          const: true
+        duplicate:
+          type: boolean
+          const: true
+        messageId:
+          type: string
+          description: 首次请求返回的消息 ID。
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        conversationId:
+          type: string
+      additionalProperties: false
+      examples:
+        - ok: true
+          duplicate: true
+          messageId: 0b1c2d3e-4f50-6789-abcd-ef0123456789
+          status: accepted
+          conversationId: 'R:10949759080209864'
+
+    SendStatusRequest:
+      type: object
+      description: 查询发送状态的请求。`messageId` 与 `id` 二者至少提供一个。
+      properties:
+        messageId:
+          type: string
+          description: '`/send` 返回的 messageId。'
+        id:
+          type: string
+          description: messageId 的别名。
+      anyOf:
+        - required:
+            - messageId
+        - required:
+            - id
+
+    SendStatusResponse:
+      type: object
+      description: 消息状态。
+      required:
+        - ok
+        - messageId
+        - status
+        - conversationId
+        - createdAt
+        - source
+      properties:
+        ok:
+          type: boolean
+          const: true
+        messageId:
+          type: string
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        conversationId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+          description: 消息来源，例如 `API 发送`、`手动发送`、`Webhook`；未知时为空字符串。
+          examples:
+            - API 发送
+      additionalProperties: false
+
+    RobotsResponse:
+      type: object
+      required:
+        - ok
+        - robots
+      properties:
+        ok:
+          type: boolean
+          const: true
+        robots:
+          type: array
+          items:
+            $ref: '#/components/schemas/RobotSummary'
+      additionalProperties: false
+      examples:
+        - ok: true
+          robots:
+            - id: 0b1c2d3e-4f50-6789-abcd-ef0123456789
+              name: 课程顾问机器人
+              mode: live
+              status: bound
+              groups: 3
+              users: 12
+
+    RobotSummary:
+      type: object
+      description: 机器人摘要。已解绑的机器人不会出现在列表中。
+      required:
+        - id
+        - name
+        - mode
+        - status
+        - groups
+        - users
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        mode:
+          type: string
+          enum:
+            - live
+            - demo
+          description: '`live` 真实机器人，`demo` 演示机器人。'
+        status:
+          type: string
+          description: 机器人状态；当前可用机器人固定为 `bound`。
+          examples:
+            - bound
+        groups:
+          type: integer
+          minimum: 0
+          description: 已同步群聊数量。
+        users:
+          type: integer
+          minimum: 0
+          description: 已同步联系人数量。
+      additionalProperties: false
+
+    ConversationsRequest:
+      type: object
+      properties:
+        robotId:
+          type: string
+          description: 机器人 ID；省略或无效时使用账户下第一个可用机器人。
+      additionalProperties: false
+
+    ConversationsResponse:
+      type: object
+      required:
+        - ok
+        - robot
+        - groups
+        - users
+      properties:
+        ok:
+          type: boolean
+          const: true
+        robot:
+          type: object
+          description: 实际使用的机器人。
+          required:
+            - id
+            - name
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+          additionalProperties: false
+        groups:
+          type: array
+          description: 群聊会话列表。
+          items:
+            $ref: '#/components/schemas/Conversation'
+        users:
+          type: array
+          description: 联系人（私聊）会话列表。
+          items:
+            $ref: '#/components/schemas/Conversation'
+      additionalProperties: false
+
+    Conversation:
+      type: object
+      description: |
+        机器人同步结果中的群聊 / 联系人对象。稳定字段为 `conversation_id` 与 `name`，
+        其余字段由上游同步结果决定，可能随版本增加，请忽略不认识的字段。
+      required:
+        - conversation_id
+        - name
+      properties:
+        conversation_id:
+          type: string
+          description: 会话 ID；`R:` 开头为群聊，`S:` 开头为私聊。
+          examples:
+            - 'R:10949759080209864'
+        name:
+          type: string
+          maxLength: 150
+          description: 群名或联系人昵称；缺失时为「未命名会话」。
+        username:
+          type: string
+        nickname:
+          type: string
+        realname:
+          type: string
+        remark:
+          type: string
+        avatar:
+          type: string
+        mobile:
+          type: string
+        position:
+          type: string
+        user_id:
+          type: string
+        corp_id:
+          type: string
+        acctid:
+          type: string
+        send_active:
+          type: boolean
+        message_active:
+          type: boolean
+      additionalProperties: true
+
+    ReadMessagesRequest:
+      type: object
+      properties:
+        robotId:
+          type: string
+          description: 机器人 ID；省略或无效时使用账户下第一个可用机器人。
+        conversationId:
+          type: string
+          description: 会话 ID；省略则读取该机器人全部会话。
+        conversation_id:
+          type: string
+          description: conversationId 的别名。
+        after:
+          type: string
+          format: date-time
+          description: 只返回晚于该时间（ISO 8601）的消息，用于增量轮询；不传则返回最近消息。
+        direction:
+          type: string
+          enum:
+            - in
+            - out
+            - all
+          default: all
+          description: '`in` 只看客户消息、`out` 只看机器人消息、`all` 全部（含 `system` 系统消息）；默认 `all`，非法值按 `all` 处理。'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          description: 返回条数，默认 20，上限 100；超出范围按边界值处理。
+      additionalProperties: false
+
+    Message:
+      type: object
+      description: 一条消息。按时间正序返回。
+      required:
+        - id
+        - conversationId
+        - conversationName
+        - direction
+        - sender
+        - senderName
+        - msgtype
+        - content
+        - imageUrl
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+        conversationId:
+          type: string
+        conversationName:
+          type: string
+          description: 会话名；会话不在同步列表中时回落到会话 ID。
+        direction:
+          type: string
+          enum:
+            - in
+            - out
+            - system
+          description: '`in` 客户消息、`out` 机器人消息、`system` 系统消息（如任务提醒）。'
+        sender:
+          type: string
+          description: 发送人 ID；出站消息为 `robot`。
+          examples:
+            - wmXXXX
+        senderName:
+          type: string
+        msgtype:
+          type: string
+          description: 消息类型，常见值 `text`、`image`、`link`、`voice`、`file` 等。
+          examples:
+            - text
+        content:
+          type: string
+          description: 消息文本内容；非文本消息可能为空字符串。
+        imageUrl:
+          type: string
+          description: 图片地址；非图片消息为空字符串。
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MessagesResponse:
+      type: object
+      required:
+        - ok
+        - messages
+        - nextAfter
+      properties:
+        ok:
+          type: boolean
+          const: true
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        nextAfter:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: 下一次增量轮询应使用的 `after`；没有消息且未传 `after` 时为 `null`。
+      additionalProperties: false
+
+    SearchMessagesRequest:
+      type: object
+      description: 搜索请求。`query` 与 `q` 至少提供一个，服务端取其一。
+      properties:
+        robotId:
+          type: string
+          description: 机器人 ID；省略或无效时使用账户下第一个可用机器人。
+        query:
+          type: string
+          description: 搜索关键词，同时匹配消息正文与发言人昵称；超过 80 字会被截断。
+        q:
+          type: string
+          description: query 的别名，超过 80 字会被截断。
+        conversationId:
+          type: string
+          description: 只搜索指定会话。
+        conversation_id:
+          type: string
+          description: conversationId 的别名。
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          description: 返回最近的 N 条结果，默认 20，上限 100。
+      anyOf:
+        - required:
+            - query
+        - required:
+            - q
+      additionalProperties: false
+
+    SearchMessage:
+      type: object
+      description: 搜索结果中的一条消息（字段比 `/messages` 少，不含 status / imageUrl）。
+      required:
+        - id
+        - conversationId
+        - conversationName
+        - direction
+        - sender
+        - senderName
+        - msgtype
+        - content
+        - createdAt
+      properties:
+        id:
+          type: string
+        conversationId:
+          type: string
+        conversationName:
+          type: string
+        direction:
+          type: string
+          enum:
+            - in
+            - out
+            - system
+        sender:
+          type: string
+        senderName:
+          type: string
+        msgtype:
+          type: string
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    SearchMessagesResponse:
+      type: object
+      required:
+        - ok
+        - query
+        - messages
+      properties:
+        ok:
+          type: boolean
+          const: true
+        query:
+          type: string
+          description: 服务端归一化后的关键词（去首尾空格、超过 80 字被截断）。
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchMessage'
+      additionalProperties: false
+
+    VersionResponse:
+      type: object
+      required:
+        - ok
+        - apiVersion
+        - basePath
+        - legacyBasePath
+      properties:
+        ok:
+          type: boolean
+          const: true
+        apiVersion:
+          type: string
+          const: '2026-10-26'
+        basePath:
+          type: string
+          const: /api/v1/open
+        legacyBasePath:
+          type: string
+          const: /api/open
+      additionalProperties: false
+
+    MessageStatus:
+      type: string
+      description: |
+        消息状态：`pending` 已入队、`accepted` 上游已受理、`failed` 上游明确拒绝、
+        `uncertain` 超时结果未知、`blocked` 因授权/额度/机器人状态未发出、`simulated` 演示机器人模拟发送、
+        `received` 客户消息已收到、`ignored` 机器人自身回流已忽略。
+      enum:
+        - pending
+        - accepted
+        - failed
+        - uncertain
+        - blocked
+        - simulated
+        - received
+        - ignored
+
+    WebhookEventBase:
+      type: object
+      description: 所有业务事件回调共有的字段。
+      required:
+        - event
+        - eventId
+        - accountId
+        - createdAt
+      properties:
+        event:
+          type: string
+          description: 事件类型。
+        eventId:
+          type: string
+          description: 事件唯一 ID；重试时保持不变，请按此去重。
+        accountId:
+          type: string
+        robotId:
+          type: string
+          description: 相关机器人 ID；可能为空字符串。
+        robotName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    MessageReceivedEvent:
+      description: '`message.received` 事件 payload：收到客户消息。'
+      allOf:
+        - $ref: '#/components/schemas/WebhookEventBase'
+        - type: object
+          required:
+            - event
+            - conversationId
+            - messageId
+            - senderId
+            - senderName
+            - msgtype
+            - content
+          properties:
+            event:
+              type: string
+              const: message.received
+            conversationId:
+              type: string
+            conversationName:
+              type: string
+            isGroup:
+              type: boolean
+              description: 会话 ID 是否以 `R:` 开头（群聊）。
+            messageId:
+              type: string
+            senderId:
+              type: string
+            senderName:
+              type: string
+            msgtype:
+              type: string
+            content:
+              type: string
+            imageUrl:
+              type: string
+            atList:
+              type: array
+              description: '@ 的成员 user_id 列表；当前通常为空数组。'
+              items:
+                type: string
+            reply:
+              $ref: '#/components/schemas/MessageReplyHint'
+
+    MessageStatusEvent:
+      description: 出站消息最终状态事件 payload（`message.sent` / `message.failed` / `message.uncertain`）。
+      allOf:
+        - $ref: '#/components/schemas/WebhookEventBase'
+        - type: object
+          required:
+            - event
+            - conversationId
+            - messageId
+            - senderId
+            - senderName
+            - msgtype
+            - content
+            - status
+          properties:
+            event:
+              type: string
+              enum:
+                - message.sent
+                - message.failed
+                - message.uncertain
+            conversationId:
+              type: string
+            conversationName:
+              type: string
+            isGroup:
+              type: boolean
+            messageId:
+              type: string
+            senderId:
+              type: string
+              description: 出站事件固定为 `robot`。
+              examples:
+                - robot
+            senderName:
+              type: string
+            msgtype:
+              type: string
+            content:
+              type: string
+            imageUrl:
+              type: string
+            status:
+              type: string
+              enum:
+                - accepted
+                - failed
+                - uncertain
+            error:
+              type: string
+              description: 失败原因；仅 `message.failed` 通常非空。
+            source:
+              type: string
+              description: 消息来源，例如 `API 发送`、`手动发送`。
+
+    TaskEvent:
+      description: 任务事件 payload（`task.reminded` / `task.confirmed` / `task.expired`）。
+      allOf:
+        - $ref: '#/components/schemas/WebhookEventBase'
+        - type: object
+          required:
+            - event
+            - taskId
+            - title
+            - conversationId
+            - dueAt
+            - remindCount
+            - status
+          properties:
+            event:
+              type: string
+              enum:
+                - task.reminded
+                - task.confirmed
+                - task.expired
+            taskId:
+              type: string
+            title:
+              type: string
+            conversationId:
+              type: string
+            conversationName:
+              type: string
+            isGroup:
+              type: boolean
+            person:
+              $ref: '#/components/schemas/WebhookPerson'
+            confirmWords:
+              type: array
+              items:
+                type: string
+            dueAt:
+              type: string
+              format: date-time
+            remindCount:
+              type: integer
+              minimum: 0
+            status:
+              type: string
+              description: 任务状态；提醒事件通常为 `pending`，确认事件为 `confirmed`，到期事件为 `expired`。
+            confirmedBy:
+              type: string
+              description: 确认人；仅 `task.confirmed` 通常非空。
+            note:
+              type: string
+
+    WebhookPerson:
+      type:
+        - object
+        - 'null'
+      description: 任务责任人；未登记时可能为 `null`。
+      properties:
+        name:
+          type: string
+        userId:
+          type: string
+
+    WebhookTestEvent:
+      description: '`webhook.test` 事件 payload：控制台连通性测试。'
+      allOf:
+        - $ref: '#/components/schemas/WebhookEventBase'
+        - type: object
+          required:
+            - event
+            - messageId
+            - senderId
+            - senderName
+            - msgtype
+            - content
+            - isGroup
+          properties:
+            event:
+              type: string
+              const: webhook.test
+            conversationId:
+              type: string
+            conversationName:
+              type: string
+            isGroup:
+              type: boolean
+            messageId:
+              type: string
+              description: 测试事件为空字符串。
+            senderId:
+              type: string
+              const: test
+            senderName:
+              type: string
+              const: 猿媒BOT 测试
+            msgtype:
+              type: string
+              const: text
+            content:
+              type: string
+
+    MessageReplyHint:
+      type: object
+      description: 回调 payload 中提供的回复提示；实际回复使用 API Token，不在回调响应里回传。
+      properties:
+        api:
+          type: string
+          description: 发送接口路径（旧地址；新接入可使用 `/api/v1/open/send`）。
+        token:
+          type: string
+          description: 固定提示文案「使用 API 接入 Token」。
+
+    WebhookReplyResponse:
+      type: object
+      description: |
+        回调 2xx 响应体。返回 `reply`（或简写 `replyText`）时，猿媒BOT 会把内容发送回原会话；
+        只有 `message.received` 事件会执行自动回复。
+      properties:
+        reply:
+          $ref: '#/components/schemas/WebhookReply'
+        replyText:
+          type: string
+          maxLength: 2000
+          description: '文本回复简写，等价于 `{"reply": {"type": "text", "content": "..."}}`。'
+      examples:
+        - reply:
+            type: text
+            content: 课程价格 199 元。
+
+    WebhookReply:
+      type: object
+      description: 自动回复内容，支持文本、图片与链接卡片。
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+            - image
+            - link
+        content:
+          type: string
+          maxLength: 2000
+          description: 文本内容（text 使用）。
+        url:
+          type: string
+          format: uri
+          description: 图片或链接地址（image / link 使用）。
+        title:
+          type: string
+          maxLength: 100
+          description: 链接标题（link 使用），缺省为「业务回复」。
+        desc:
+          type: string
+          maxLength: 500
+          description: 链接摘要（link 使用）。

@@ -42,6 +42,8 @@
 - 可选 IP 白名单
 - 工具带风险等级
 - 支持读消息、搜消息、发文本/图片/链接、定时发送
+- 支持登记 / 查询任务跟踪、查询客户群成员花名册
+- 支持 OAuth 2.1，Claude.ai / ChatGPT 等远程客户端可直接授权接入
 
 见 [MCP 接入](mcp.md)。
 
@@ -54,7 +56,28 @@ POST https://chatbot.apetd.com/api/open/send
 Authorization: Bearer <token>
 ```
 
-见 [发送 API](api.md)。
+也支持读取消息、搜索消息、查询发送状态和幂等发送，见 [开发者 API](api.md)。
+
+### 事件回调
+
+适合把群消息同步到自己的 CRM / 工单 / AI 系统，并在回调里直接回复。
+
+- 群消息、机器人发送结果、任务提醒 / 确认 / 到期实时推送，HMAC-SHA256 签名
+- 可按事件类型订阅，不勾选的不推送
+- 可直接返回 `reply` 自动回群，也可稍后调用发送 API
+- 失败自动重试，保留投递记录
+
+见 [事件回调](callback.md)。
+
+### 命令行 CLI
+
+适合脚本、cron 和不支持 MCP 的 Agent，基于开发者 API。
+
+```bash
+yuanmei read --conversation 'R:...' --limit 20
+```
+
+见 [命令行 CLI](cli.md)。
 
 ## 客户端支持
 
@@ -78,7 +101,11 @@ Authorization: Bearer <token>
 
 - [快速开始](quick-start.md)
 - [MCP 接入](mcp.md)
-- [发送 API](api.md)
+- [开发者 API](api.md)
+- [开发者接入指南](developer.md)
+- [OpenAPI 3.1 规范](openapi.yaml)
+- [事件回调](callback.md)
+- [命令行 CLI](cli.md)
 - [AI 知识库](ai-knowledge.md)
 - [常见问题](faq.md)
 - [安全与数据](security.md)
