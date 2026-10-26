@@ -7,7 +7,7 @@ MCP 用于让 WorkBuddy、DeepSeek Harness、龙虾 OpenClaw、爱马仕 Hermes 
 进入：
 
 ```text
-个人中心 → API 接入 → MCP 接入
+个人中心 → MCP 接入
 ```
 
 点「签发 MCP 令牌」。
