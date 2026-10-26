@@ -10,10 +10,16 @@
 
 ## 2. 安装插件
 
+桌面版直接：
+
+```text
+插件 → 添加插件 → 填 https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp
+```
+
+命令行安装时先确认当前 profile（桌面版通常是 `desktop`，Web 版是 `web`）：
+
 ```bash
-git clone https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp.git
-cd yuanmei-bot-dsh-mcp
-dsh plugin --profile web add link:$(pwd)
+dsh plugin --profile <profile> add https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp
 ```
 
 ## 3. 设置令牌
