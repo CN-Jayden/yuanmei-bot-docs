@@ -39,3 +39,14 @@ WorkBuddy 的用户级配置：
 ## 3. 验证
 
 保存后查看 MCP 状态是否为绿色，然后在 WorkBuddy 里让它调用 `whoami`。
+
+
+## 现成配置
+
+仓库提供：
+
+```text
+https://github.com/CN-Jayden/yuanmei-bot-agent-skills/blob/main/workbuddy/mcp.json
+```
+
+把 `<YUANMEI_MCP_TOKEN>` 替换成实际令牌即可。

@@ -1,6 +1,6 @@
 # DeepSeek Harness 接入
 
-猿媒BOT 提供 DSH 插件，安装后自动注册 MCP。
+推荐用 MCP 管理插件，在界面里配置，不需要环境变量。
 
 ## 1. 签发令牌
 
@@ -8,78 +8,63 @@
 个人中心 → API 接入 → MCP 接入 → 签发 MCP 令牌
 ```
 
-## 方案 A：猿媒BOT DSH 插件（环境变量）
+## 2. 安装 MCP 管理插件
 
-### 安装插件
-
-桌面版直接：
+在 DSH：
 
 ```text
-插件 → 添加插件 → 填 https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp
+插件 → 添加插件 → 搜索 dsh-mcp → 安装
 ```
 
-命令行安装时先确认当前 profile（桌面版通常是 `desktop`，Web 版是 `web`）：
+项目地址：
 
-```bash
-dsh plugin --profile <profile> add https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp
+https://github.com/ArvinQi/dsh-mcp
+
+注意：这是第三方插件，安装前确认作者和源码。
+
+## 3. 添加猿媒BOT
+
+打开：
+
+```text
+设置 → MCP → 添加服务器
 ```
 
-### 设置令牌
+填写：
 
-macOS / Linux：
-
-```bash
-export YUANMEI_MCP_TOKEN='你的令牌'
+```text
+名称：yuanmei
+传输方式：streamable-http
+URL：https://chatbot.apetd.com/mcp
+请求头：Authorization: Bearer <TOKEN>
 ```
 
-Windows PowerShell：
+保存后点「连接测试」。
 
-```powershell
-$env:YUANMEI_MCP_TOKEN = '你的令牌'
-```
+## 4. 验证
 
-### 重启
-
-```bash
-dsh web
-```
-
-### 验证
-
-在 DSH 中调用：
+在会话中调用：
 
 ```text
 mcp__yuanmei__whoami
 ```
 
-应该返回工作空间和工具范围。
+返回工作空间和工具范围即可。
 
-插件仓库：
+## 高级：安装猿媒BOT DSH 插件
 
-https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp
-
-
-## 方案 B：用 MCP 管理插件，在界面配置
-
-如果你不想设置环境变量，可以改用 `dsh-mcp` 管理插件。
-
-1. 先卸载 `yuanmei-bot-dsh-mcp`，避免两个插件都注册 `yuanmei`
-2. 在 DSH「插件 → 添加插件」安装 `dsh-mcp`
-3. 打开「设置 → MCP → 添加服务器」
-4. 填写：
+如果希望插件自动注册 `yuanmei`，可以改用：
 
 ```text
-名称：yuanmei
-传输：streamable-http
-URL：https://chatbot.apetd.com/mcp
-请求头：Authorization: Bearer <TOKEN>
+https://github.com/CN-Jayden/yuanmei-bot-dsh-mcp
 ```
 
-5. 点「连接测试」
-6. 在会话中调用 `mcp__yuanmei__whoami`
+安装后需要设置：
 
-注意：`dsh-mcp` 是第三方插件，安装前确认作者和源码：
+```bash
+YUANMEI_MCP_TOKEN='你的令牌'
+```
 
-https://github.com/ArvinQi/dsh-mcp
+并重启 DSH。
 
-两个方案二选一，不要同时启用。
+两种方式二选一，不要同时启用，否则 `yuanmei` 会重复注册。

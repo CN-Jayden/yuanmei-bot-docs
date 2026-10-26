@@ -29,3 +29,30 @@
 ## 3. 验证
 
 接入后先调用 `whoami`，不要先发消息。
+
+
+## 可选：安装 Agent Skill
+
+如果 OpenClaw 使用 AgentSkills，可以把：
+
+```text
+integrations/agent-skills/yuanmei-mcp
+```
+
+复制到：
+
+```text
+<workspace>/skills/yuanmei-mcp
+```
+
+或：
+
+```text
+~/.openclaw/skills/yuanmei-mcp
+```
+
+Skill 只负责教 Agent 使用 `mcp__yuanmei__*` 工具，MCP 地址和令牌仍需先配置。
+
+仓库：
+
+https://github.com/CN-Jayden/yuanmei-bot-agent-skills/tree/main/skills/yuanmei-mcp

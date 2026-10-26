@@ -29,3 +29,32 @@ hermes mcp test yuanmei
 ## 4. 注意
 
 MCP 是 profile 级的；如果当前 profile 看不到工具，确认是在目标 profile 中添加的。
+
+
+## 可选：MCP Catalog / Skill
+
+Hermes 可以直接用 MCP：
+
+```bash
+hermes mcp add yuanmei --url https://chatbot.apetd.com/mcp
+```
+
+如果希望进入 Hermes MCP Catalog，提交材料在：
+
+```text
+integrations/hermes-catalog
+```
+
+Catalog 需要 Hermes 官方审核，提交不代表一定收录。
+
+也可以使用 AgentSkills：
+
+```text
+integrations/agent-skills/yuanmei-mcp
+```
+
+放入 Hermes 的 skills 目录。
+
+仓库：
+
+https://github.com/CN-Jayden/yuanmei-bot-agent-skills/tree/main/hermes
